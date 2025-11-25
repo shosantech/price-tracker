@@ -1,18 +1,31 @@
+// electron/preload.js
 const { contextBridge, ipcRenderer } = require('electron');
 
-contextBridge.exposeInMainWorld('electronAPI', {
-  // Send a message to main
-  send: (channel, data) => {
-    const validChannels = ['update-settings', 'notify'];
-    if (validChannels.includes(channel)) {
-      ipcRenderer.send(channel, data);
-    }
+contextBridge.exposeInMainWorld('api', {
+  // get current stored settings
+  getSettings: async () => {
+    return await ipcRenderer.invoke('get-settings');
   },
-  // Receive messages from main
+
+  // save settings (object with keys like setPrice, buyPrice, thresholdPercent, pollingInterval)
+  saveSettings: async (settings) => {
+    return await ipcRenderer.invoke('save-settings', settings);
+  },
+
+  // send a notification via main
+  notify: (message) => {
+    ipcRenderer.send('notify', message);
+  },
+
+  // manual fetch helper (not used by core polling but available)
+  manualFetch: async () => {
+    return await ipcRenderer.invoke('manual-fetch');
+  },
+
+  // allow renderer to listen to arbitrary events from main if needed
   on: (channel, callback) => {
-    const validChannels = ['price-update', 'settings-updated'];
-    if (validChannels.includes(channel)) {
-      ipcRenderer.on(channel, (event, ...args) => callback(...args));
-    }
+    const validChannels = ['open-settings', 'price-alert'];
+    if (!validChannels.includes(channel)) return;
+    ipcRenderer.on(channel, (event, ...args) => callback(...args));
   }
 });
