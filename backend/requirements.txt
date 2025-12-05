@@ -1,0 +1,8 @@
+yfinance
+pandas
+requests
+vaderSentiment
+python-dotenv
+schedule
+newsapi-python
+gnews
