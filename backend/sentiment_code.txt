@@ -1,0 +1,463 @@
+news_fetcher:
+import requests
+from datetime import datetime, timedelta
+from config.settings import NEWSDATA_API_KEY
+
+def fetch_gold_news_past_week():
+    url = "https://newsdata.io/api/1/news"
+
+    today = datetime.utcnow()
+    week_ago = today - timedelta(days=7)
+
+    params = {
+        "apikey": NEWSDATA_API_KEY,
+        "q": (
+            "gold"
+        ),
+        "language": "en",
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        print(f"Error fetching gold news: {e}")
+        return [], 0
+
+    articles = []
+
+    for a in data.get("results", []):
+        try:
+            published_at = datetime.fromisoformat(
+                a["pubDate"].replace("Z", "+00:00")
+            )
+        except Exception:
+            continue
+
+        # Keep only last 7 days
+        if published_at < week_ago:
+            continue
+
+        articles.append({
+            "source": a.get("source_id", "Unknown"),
+            "publishedAt": published_at,
+            "title": a.get("title"),
+            "url": a.get("link"),
+        })
+
+    # Sort newest → oldest
+    articles.sort(key=lambda x: x["publishedAt"], reverse=True)
+
+    return articles, len(articles)
+
+
+if __name__ == "__main__":
+    articles, total_results = fetch_gold_news_past_week()
+    print(f"Total results in past week: {total_results}\n")
+
+    for i, article in enumerate(articles, start=1):
+        print(
+            f"{i}. {article['source']} - {article['title']} - {article['publishedAt']}"
+        )
+        print(f"URL: {article['url']}\n")
+
+
+sentiment.py:
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from datetime import datetime, timezone
+import numpy as np
+
+analyzer = SentimentIntensityAnalyzer()
+
+CREDIBLE_SOURCES = {
+    "Reuters": 1.3,
+    "Bloomberg": 1.3,
+    "CNBC": 1.2,
+    "Financial Times": 1.3,
+    "WSJ": 1.3
+}
+
+GOLD_KEYWORDS = [
+    "gold", "bullion", "precious metal", "fed", "inflation",
+    "interest rates", "central bank", "usd", "dollar"
+]
+
+
+def calculate_weighted_sentiment(sentiment_list):
+    from datetime import datetime, timezone
+
+    credible_sources = ["Reuters", "Bloomberg", "CNBC", "BusinessLine", "The Times of India"]
+    now = datetime.now(timezone.utc)
+
+    weighted = []
+
+    for a in sentiment_list:
+        score = a["sentiment"]
+
+        # Source weight
+        weight = 2 if a.get("source") in credible_sources else 1
+
+        # Recency decay
+        try:
+            published_at = datetime.fromisoformat(
+                a["publishedAt"].replace("Z", "+00:00")
+            )
+            hours_ago = (now - published_at).total_seconds() / 3600
+            recency = max(0.5, 1 - hours_ago / 72)
+        except Exception:
+            recency = 0.75
+
+        weighted.append(score * weight * recency)
+
+    return sum(weighted) / max(len(weighted), 1)
+
+
+def score_article(article):
+    """Score a single article without filtering it out"""
+
+    # --- Sentiment ---
+    sentiment = analyzer.polarity_scores(article["title"])["compound"]
+
+    # --- Credibility ---
+    credibility = CREDIBLE_SOURCES.get(article.get("source", ""), 1.0)
+
+    # --- Relevance (soft, not binary) ---
+    title = article["title"].lower()
+    relevance_hits = sum(1 for k in GOLD_KEYWORDS if k in title)
+    relevance = 1 + min(relevance_hits * 0.2, 1.0)  # cap boost
+
+    # --- Recency (soft decay, no cutoff) ---
+    try:
+        published_at = article["publishedAt"]
+        if isinstance(published_at, str):
+            published_at = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+
+        hours_ago = (datetime.now(timezone.utc) - published_at).total_seconds() / 3600
+        recency = max(0.3, 1 - (hours_ago / 168))  # 7-day decay
+    except Exception:
+        recency = 0.6
+
+    # --- Final article score ---
+    final_score = sentiment * credibility * relevance * recency
+
+    return {
+        **article,
+        "sentiment": sentiment,
+        "credibility": credibility,
+        "relevance": relevance,
+        "recency": recency,
+        "final_score": final_score
+    }
+
+
+
+def compute_sentiment(articles, past_volumes, past_avg_sentiments=None):
+
+    sentiment_list = []
+    for a in articles:
+        score = analyzer.polarity_scores(a["title"])["compound"]
+        sentiment_list.append({
+            "title": a["title"],
+            "source": a.get("source", "Unknown"),
+            "publishedAt": a["publishedAt"],
+            "sentiment": score
+        })
+
+    this_week = len(articles)
+    avg_weekly = np.mean([v[1] for v in past_volumes]) if past_volumes else this_week
+
+    volume_increase = ((this_week - avg_weekly) / avg_weekly) * 100 if avg_weekly else 0
+    volume_flag = volume_increase >= 20
+
+    # ✅ compute ONCE
+    current_avg_sentiment = calculate_weighted_sentiment(sentiment_list)
+
+    if past_avg_sentiments is None:
+        past_avg_sentiments = []
+    past_avg_sentiments.append(current_avg_sentiment)
+
+    return (
+        sentiment_list,
+        volume_flag,
+        this_week,
+        avg_weekly,
+        volume_increase,
+        current_avg_sentiment,
+        past_avg_sentiments,
+    )
+
+
+def generate_sentiment(price_df, avg_sentiment, volume_flag, past_sentiments=None):
+    """
+    Generates a signal using ranked news sentiment + technical context.
+    History adjusts confidence, not direction.
+    """
+
+    # -------------------------------------------------
+    # 1. Historical normalization (soft, continuous)
+    # -------------------------------------------------
+    if past_sentiments and len(past_sentiments) >= 3:
+        hist_mean = np.mean(past_sentiments)
+        hist_std = np.std(past_sentiments) + 1e-6
+        z_score = (avg_sentiment - hist_mean) / hist_std
+
+        # Clamp extreme z-scores
+        z_score = np.clip(z_score, -2.5, 2.5)
+
+        # Normalize to [-1, 1]
+        sentiment_component = z_score / 2.5
+    else:
+        # No history → trust raw sentiment (but clamp)
+        sentiment_component = np.clip(avg_sentiment, -1, 1)
+        z_score = None
+
+    # -------------------------------------------------
+    # 2. Volume confirmation (boost, not filter)
+    # -------------------------------------------------
+    if volume_flag:
+        sentiment_component *= 1.15
+
+    # -------------------------------------------------
+    # 3. Technical trend
+    # -------------------------------------------------
+    ma20 = price_df["MA_20"].iloc[-1]
+    ma50 = price_df["MA_50"].iloc[-1]
+    trend_component = 1 if ma20 > ma50 else -1 if ma20 < ma50 else 0
+
+    # -------------------------------------------------
+    # 4. RSI context
+    # -------------------------------------------------
+    rsi = price_df["RSI"].iloc[-1]
+    if rsi < 30:
+        rsi_component = 1
+    elif rsi > 70:
+        rsi_component = -1
+    else:
+        rsi_component = 0
+
+    # -------------------------------------------------
+    # 5. Price location (range-aware)
+    # -------------------------------------------------
+    close = price_df["Close"].iloc[-1]
+    recent_min = price_df["Close"].rolling(30).min().iloc[-1]
+    recent_max = price_df["Close"].rolling(30).max().iloc[-1]
+
+    if close <= recent_min * 1.03:
+        price_component = 1
+    elif close >= recent_max * 0.97:
+        price_component = -1
+    else:
+        price_component = 0
+
+    # -------------------------------------------------
+    # 6. Weighted fusion
+    # -------------------------------------------------
+    final_score = (
+        1.4 * sentiment_component +
+        1.0 * trend_component +
+        0.6 * rsi_component +
+        0.6 * price_component
+    )
+
+    # -------------------------------------------------
+    # 7. Decision bands
+    # -------------------------------------------------
+    if final_score >= 1.2:
+        signal = "BUY"
+    elif final_score <= -1.2:
+        signal = "SELL"
+    else:
+        signal = "HOLD"
+
+    print(
+        f"DEBUG | sentiment={avg_sentiment:.3f} "
+        f"| z={round(z_score,2) if z_score is not None else 'n/a'} "
+        f"| final={round(final_score,2)} "
+        f"| signal={signal}"
+    )
+
+    return signal, avg_sentiment
+app.py:
+from flask import Flask, jsonify
+from flask_cors import CORS
+from datetime import datetime, timedelta
+
+from fetchers.price_fetcher import fetch_gold_prices
+# from fetchers.news_fetcher import fetch_gold_news_past_week
+# from fetchers.gdelt_fetcher import fetch_gold_news_gdelt
+from fetchers.alpha_news_fetcher import fetch_gold_news
+
+
+from processors.technicals import compute_technicals, generate_technical
+from processors.sentiment import compute_sentiment, generate_sentiment
+from fusion import decision_engine
+from fusion.combined_signal import generate_combined_signal
+
+from database.db import (
+    init_db,
+    save_gold_price,
+    save_news,
+    save_news_volume,
+    load_past_volumes,
+    load_past_avg_sentiments,
+)
+
+app = Flask(__name__)
+CORS(app)
+init_db()
+
+
+@app.route("/analyze", methods=["GET"])
+def analyze():
+
+    # --------------------------
+    # 1. FETCH + PROCESS PRICES
+    # --------------------------
+    price_df = fetch_gold_prices(period="1y", interval="1d")
+    price_df = compute_technicals(price_df)
+
+    # Technical signal (60-day based)
+    technical = generate_technical(price_df)
+    
+    technical_signal = technical["signal"]
+    technical_confidence =technical["confidence"]
+
+
+    # --------------------------
+    # 2. NEWS + SENTIMENT
+    # --------------------------
+    articles = fetch_gold_news()
+
+    past_volumes = load_past_volumes()
+    past_avg_sentiments = load_past_avg_sentiments()
+
+    (
+    sentiment_list,
+    volume_flag,
+    this_week,
+    avg_weekly,
+    volume_increase,
+    avg_sentiment,
+    past_avg_sentiments
+    ) = compute_sentiment(
+    articles,
+    past_volumes,
+    past_avg_sentiments
+    )
+
+    sentiment_signal, _ = generate_sentiment(
+    price_df,
+    avg_sentiment,
+    volume_flag,
+    past_avg_sentiments
+    )
+
+    # Generate sentiment signal WITH history
+    sentiment_signal, _ = generate_sentiment(
+        price_df,
+        avg_sentiment,
+        volume_flag,
+        past_avg_sentiments
+    )
+
+    sentiment_confidence = min(abs(avg_sentiment) * 100, 100)
+
+
+    # --------------------------
+    # 3. SAVE WEEKLY SENTIMENT
+    # --------------------------
+    week_start = (
+        datetime.utcnow() - timedelta(days=datetime.utcnow().weekday())
+    ).strftime("%Y-%m-%d")
+
+    save_news_volume(week_start, this_week, avg_sentiment)
+
+    # --------------------------
+    # 4. SAVE PRICE HISTORY
+    # --------------------------
+    for _, row in price_df.iterrows():
+        save_gold_price({
+            "date": row["Date"].strftime("%Y-%m-%d"),
+            "close": row["Close"],
+            "volume": row["Volume"],
+            "ma20": row["MA_20"],
+            "ma50": row["MA_50"],
+            "rsi": row["RSI"],
+        })
+
+    # --------------------------
+    # 5. SAVE NEWS
+    # --------------------------
+    for article in sentiment_list:
+        save_news(article)
+
+    # --------------------------
+    # 6. COMBINED SIGNAL
+    # --------------------------
+    combined_signal = generate_combined_signal(
+    technical_signal,
+    sentiment_signal
+    )    
+    # --------------------------
+    # Combined confidence (weighted sum)
+    # --------------------------
+
+    combined_confidence = round(
+        (technical_confidence * 0.7) + (sentiment_confidence * 0.3), 1
+    )
+
+
+    # 6️⃣ How confidence maps to behavior (recommended)
+    # Confidence	Signal Meaning	Suggested Action
+    # 85–100%	Strong alignment	Aggressive buy / add
+    # 70–84%	Healthy trend	Buy / scale in
+    # 55–69%	Mixed signals	Hold / small entries
+    # 40–54%	Weak alignment	Wait
+    # < 40%	Risky	Avoid / exit
+
+    # So 70% BUY = lower-risk trend participation, not hype.
+
+
+    # --------------------------
+    # 7. API RESPONSE
+    # --------------------------
+    return jsonify({
+        
+    "week_start": week_start,
+    "this_week_articles": int(this_week),
+    "average_weekly_articles": float(avg_weekly),
+    "volume_increase_percent": float(volume_increase),
+    "news_volume_spike": bool(volume_flag),
+
+    "technical": technical,
+    "technical_confidence": technical["confidence"],
+    "sentiment_signal": sentiment_signal,
+    "combined_signal": combined_signal,
+     "combined_confidence": combined_confidence,
+    # "combined_score": combined_score,
+    # "combined_confidence": combined_conf,
+
+    "sentiment": sentiment_list,
+})
+
+
+## What Signal means:
+
+## 1️⃣ Trend:     "Are we allowed to buy?"
+## 2️⃣ Structure: "Is price favorable?"
+## 3️⃣ RSI:       "Is momentum stretched?"
+## 4️⃣ Volume:    "Is this move real?"
+
+#Final clarity statement (lock this in)
+
+##Trend decides direction
+##Structure decides value
+##RSI decides timing
+##Volume decides confidence
+
+##########
+
+if __name__ == "__main__":
+    print("🔥 Flask API running at http://127.0.0.1:5000")
+    app.run(debug=True)

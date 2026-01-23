@@ -5,6 +5,7 @@ load_dotenv()
 
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
+NEWSDATA_API_KEY = os.getenv("NEWSDATA_API_KEY")
 
 DEFAULT_SYMBOL = "GC=F"  # Gold Futures symbol on Yahoo Finance
 
