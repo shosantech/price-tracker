@@ -1,0 +1,946 @@
+settings.py:
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
+NEWSDATA_API_KEY = os.getenv("NEWSDATA_API_KEY")
+
+DEFAULT_SYMBOL = "GC=F"  # Gold Futures symbol on Yahoo Finance
+
+DB_PATH = os.path.join(os.path.dirname(__file__), "..", "market_data.db")
+
+
+
+db.py:
+import sqlite3
+from config.settings import DB_PATH
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    c.execute("""CREATE TABLE IF NOT EXISTS gold_prices (
+        date TEXT PRIMARY KEY,
+        close REAL,
+        volume REAL,
+        ma20 REAL,
+        ma50 REAL,
+        rsi REAL
+    )""")
+
+    c.execute("""CREATE TABLE IF NOT EXISTS news (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT,
+        source TEXT,
+        publishedAt TEXT,
+        sentiment REAL
+    )""")
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS news_volume (
+            week_start TEXT PRIMARY KEY,
+            total_articles INTEGER,
+            average_sentiment REAL
+        )
+        """)
+    
+    c.execute("""CREATE TABLE IF NOT EXISTS signal_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT,
+    price REAL,
+    technical_signal TEXT,
+    technical_confidence REAL,
+    sentiment_signal TEXT,
+    sentiment_confidence REAL,
+    combined_signal TEXT,
+    combined_confidence REAL,
+    regime TEXT,
+    explanation TEXT
+    );""")
+
+
+    conn.commit()
+    conn.close()
+
+def save_gold_price(data):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        INSERT OR REPLACE INTO gold_prices (date, close, volume, ma20, ma50, rsi)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (data['date'], data['close'], data['volume'], data['ma20'], data['ma50'], data['rsi']))
+    conn.commit()
+    conn.close()
+
+def save_news(data):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO news (title, source, publishedAt, sentiment)
+        VALUES (?, ?, ?, ?)
+    """, (data['title'], data['source'], data['publishedAt'], data['sentiment']))
+    conn.commit()
+    conn.close()
+
+def save_news_volume(week_start, total_articles, average_sentiment):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        INSERT OR REPLACE INTO news_volume (week_start, total_articles, average_sentiment)
+        VALUES (?, ?, ?)
+    """, (week_start, total_articles, average_sentiment))
+    conn.commit()
+    conn.close()
+
+def load_past_volumes():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    c.execute("SELECT week_start, total_articles, average_sentiment FROM news_volume ORDER BY week_start DESC")
+    rows = c.fetchall()
+
+    conn.close()
+
+    # Return list of (week_start, count)
+    return rows
+
+# In database/db.py
+
+def load_past_avg_sentiments():
+    """
+    Returns a list of past weekly average sentiments from the database.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT average_sentiment FROM news_volume ORDER BY week_start ASC")
+    rows = cursor.fetchall()
+    conn.close()
+
+    # Each row is a tuple (avg_sentiment,), so extract the float
+    return [row[0] for row in rows]
+
+
+# In database/db.py
+
+def save_signal(data):
+    """
+    Save a combined signal entry into the signal_history table.
+    Expects a dict with keys:
+    - date, price, technical_signal, technical_confidence,
+      sentiment_signal, sentiment_confidence, combined_signal,
+      combined_confidence, regime, explanation
+    """
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    c.execute("""
+        INSERT INTO signal_history (
+            date, price,
+            technical_signal, technical_confidence,
+            sentiment_signal, sentiment_confidence,
+            combined_signal, combined_confidence,
+            regime, explanation
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        data.get("date"),
+        data.get("price"),
+        data.get("technical_signal"),
+        data.get("technical_confidence"),
+        data.get("sentiment_signal"),
+        data.get("sentiment_confidence"),
+        data.get("combined_signal"),
+        data.get("combined_confidence"),
+        data.get("regime"),
+        data.get("explanation")
+    ))
+
+    conn.commit()
+    conn.close()
+
+
+
+news_fetcher.py:
+import requests
+from datetime import datetime, timedelta
+from config.settings import NEWSDATA_API_KEY
+
+def fetch_gold_news_past_week():
+    url = "https://newsdata.io/api/1/news"
+
+    params = {
+        "apikey": NEWSDATA_API_KEY,
+        "q": "gold price OR gold market OR gold investment OR gold bullion",
+        "language": "en",
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        print(f"Error fetching gold news: {e}")
+        return []
+
+    articles = []
+
+    for a in data.get("results", []):
+        articles.append({
+            "source": a.get("source_id", "Unknown"),
+            "publishedAt": a.get("pubDate"),  # keep raw
+            "title": a.get("title") or "",
+            "url": a.get("link"),
+        })
+
+    return articles
+
+
+if __name__ == "__main__":
+    articles, total_results = fetch_gold_news_past_week()
+    print(f"Total results in past week: {total_results}\n")
+
+    for i, article in enumerate(articles, start=1):
+        print(
+            f"{i}. {article['source']} - {article['title']} - {article['publishedAt']}"
+        )
+        print(f"URL: {article['url']}\n")
+
+combined_signal.py:
+# fusion/combined_signal.py
+
+# fusion/combined_signal.py
+
+def convert_signal_to_numeric(signal: str) -> float:
+    signal = signal.upper()
+    if signal == "BUY":
+        return 1.0
+    elif signal == "SELL":
+        return -1.0
+    return 0.0
+
+
+def detect_regime(technical: dict) -> str:
+    trend_strength = (
+        abs(technical["components"].get("trend_short", 0)) +
+        abs(technical["components"].get("trend_medium", 0)) +
+        abs(technical["components"].get("trend_long", 0))
+    )
+
+    volatility = technical["components"].get("volatility_factor", 1)
+
+    if trend_strength >= 2 and volatility > 0.9:
+        return "TRENDING"
+    else:
+        return "RANGING"
+
+
+def generate_explanation(technical, sentiment_signal, regime):
+    reasons = []
+
+    if technical["signal"] == "SELL":
+        reasons.append("Price is overextended near resistance with high RSI.")
+    elif technical["signal"] == "BUY":
+        reasons.append("Price is near support with bullish structure.")
+
+    if sentiment_signal == "BUY":
+        reasons.append("News sentiment is strongly positive.")
+    elif sentiment_signal == "SELL":
+        reasons.append("News sentiment is negative and risk-off.")
+
+    if regime == "RANGING":
+        reasons.append("Market is in a ranging regime; mean-reversion dominates.")
+    else:
+        reasons.append("Market is in a trending regime; momentum dominates.")
+
+    return " ".join(reasons)
+
+
+
+def generate_combined_signal(technical: dict, sentiment_signal: str, avg_sentiment: float = 0.0):
+    tech_score = technical.get("score", 0)
+    tech_conf = technical.get("confidence", 100) / 100
+    weighted_tech = tech_score * tech_conf * 0.6
+
+    sent_numeric = convert_signal_to_numeric(sentiment_signal)
+    sentiment_strength = max(min(abs(avg_sentiment), 1.0), 0.0) * 0.4
+    weighted_sentiment = sent_numeric * sentiment_strength
+
+    combined_score = weighted_tech + weighted_sentiment
+
+    # Gold asymmetry
+    if combined_score < 0:
+        combined_score *= 1.15
+    else:
+        combined_score *= 0.95
+
+    if combined_score >= 0.6:
+        final_signal = "BUY"
+    elif combined_score <= -0.6:
+        final_signal = "SELL"
+    else:
+        final_signal = "HOLD"
+
+    # ---------- REGIME ----------
+    regime = detect_regime(technical)
+
+    # ---------- ALIGNMENT ----------
+    tech_dir = 1 if tech_score > 0 else -1 if tech_score < 0 else 0
+    sent_dir = 1 if sent_numeric > 0 else -1 if sent_numeric < 0 else 0
+
+    if tech_dir == sent_dir:
+        alignment = 1.0
+    elif sent_dir == 0 or tech_dir == 0:
+        alignment = 0.8
+    else:
+        alignment = 0.5
+
+    # ---------- CONFIDENCE ----------
+    base_conf = min(abs(combined_score) * 100, 100)
+    combined_confidence = round(base_conf * alignment, 1)
+
+    explanation = generate_explanation(
+        technical,
+        sentiment_signal,
+        regime
+    )
+
+    return {
+        "signal": final_signal,
+        "score": round(combined_score, 2),
+        "confidence": combined_confidence,
+        "regime": regime,
+        "explanation": explanation
+    }
+
+
+sentiment.py:
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from datetime import datetime, timezone
+import numpy as np
+from difflib import SequenceMatcher
+
+
+analyzer = SentimentIntensityAnalyzer()
+
+HIGH_IMPACT_ARTICLE_THRESHOLD = 10
+MIN_ARTICLES_FOR_SENTIMENT = 5
+
+SENTIMENT_BUY_THRESHOLD = 0.35
+SENTIMENT_SELL_THRESHOLD = -0.35
+
+MAX_SENTIMENT_WEIGHT = 0.4   # sentiment can never dominate
+TECHNICAL_WEIGHT = 0.6
+
+
+CREDIBLE_SOURCES = {
+    "reuters": 1.5,
+    "bloomberg": 1.5,
+    "financial times": 1.4,
+    "wsj": 1.4,
+    "cnbc": 1.3,
+    "livemint": 1.2,
+    "barchart": 1.1,
+}
+
+GOLD_KEYWORDS = [
+    "gold", "bullion", "precious metal", "fed", "inflation",
+    "interest rates", "central bank", "usd", "dollar"
+]
+
+EQUITY_TERMS = [
+    "nyse:", "nasdaq:", "shares", "stock",
+    "price target", "earnings", "equity"
+]
+
+
+def is_similar(a, b, threshold=0.85):
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio() >= threshold
+
+def deduplicate_articles(scored_articles):
+    deduped = []
+
+    for art in sorted(scored_articles, key=lambda x: x["final_score"], reverse=True):
+        if not any(is_similar(art["title"], d["title"]) for d in deduped):
+            deduped.append(art)
+
+    return deduped
+
+def equity_penalty(title):
+    title = title.lower()
+    return 0.7 if any(t in title for t in EQUITY_TERMS) else 1.0
+
+
+INSTITUTIONAL_TERMS = [
+    "purchase", "buying spree", "accumulation",
+    "added to reserves", "holdings increased"
+]
+
+PRICE_TARGET_TERMS = [
+    "price target", "raises target", "cuts target",
+    "forecast", "outlook"
+]
+
+MACRO_TERMS = [
+    "inflation", "interest rates", "fed",
+    "central bank", "geopolitical", "war",
+    "sanctions", "recession"
+]
+
+
+def topic_relevance_adjustment(title: str) -> float:
+    t = title.lower()
+
+    if any(x in t for x in INSTITUTIONAL_TERMS):
+        return 0.7
+    if any(x in t for x in PRICE_TARGET_TERMS):
+        return 0.6
+    if any(x in t for x in MACRO_TERMS):
+        return 1.3
+
+    return 1.0
+
+
+def score_article(article):
+    """Score a single article with soft relevance weighting"""
+
+    title = article["title"]
+
+    # --- Sentiment ---
+    sentiment = analyzer.polarity_scores(title)["compound"]
+
+    # --- Credibility ---
+    credibility = CREDIBLE_SOURCES.get(article.get("source", "").lower(), 1.0)
+
+    # --- Keyword relevance ---
+    title_l = title.lower()
+    relevance_hits = sum(1 for k in GOLD_KEYWORDS if k in title_l)
+    relevance = 1 + min(relevance_hits * 0.2, 1.0)
+
+    # --- Topic soft filter ---
+    relevance *= topic_relevance_adjustment(title)
+
+    # --- Recency ---
+    try:
+        published_at = article["publishedAt"]
+        if isinstance(published_at, str):
+            published_at = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+
+        hours_ago = (datetime.now(timezone.utc) - published_at).total_seconds() / 3600
+        recency = max(0.3, 1 - (hours_ago / 168))
+    except Exception:
+        recency = 0.6
+
+    equity_weight = equity_penalty(title)
+
+    final_score = sentiment * credibility * relevance * recency * equity_weight
+
+    return {
+        **article,
+        "sentiment": sentiment,
+        "credibility": credibility,
+        "relevance": relevance,
+        "recency": recency,
+        "final_score": final_score
+    }
+
+
+
+
+def compute_sentiment(articles, past_volumes, past_avg_sentiments=None):
+
+    # -------------------------
+    # 1. Score every article
+    # -------------------------
+    scored_articles = []
+    for a in articles:
+        if not a.get("title"):
+            continue
+        scored_articles.append(score_article(a))
+
+    this_week = len(scored_articles)
+    avg_weekly = np.mean([v[1] for v in past_volumes]) if past_volumes else this_week
+
+    volume_increase = (
+        ((this_week - avg_weekly) / avg_weekly) * 100
+        if avg_weekly else 0
+    )
+    volume_flag = volume_increase >= 20
+
+    # -------------------------
+    # 2. Deduplicate headlines
+    # -------------------------
+    scored_articles = deduplicate_articles(scored_articles)
+
+    # -------------------------
+    # 3. Rank by impact
+    # -------------------------
+    scored_articles.sort(
+        key=lambda x: abs(x["final_score"]),
+        reverse=True
+    )
+
+    # -------------------------
+    # 4. Split influence roles
+    # -------------------------
+    top_5 = scored_articles[:5]
+    top_10 = scored_articles[:10]
+
+    # Direction → strongest signals
+    directional_avg = (
+        np.mean([a["final_score"] for a in top_5])
+        if top_5 else 0.0
+    )
+
+    # Confidence → broader pressure
+    confidence_avg = (
+        np.mean([a["final_score"] for a in top_10])
+        if top_10 else 0.0
+    )
+
+    # -------------------------
+    # 5. Sentiment dispersion
+    # -------------------------
+    sentiment_std = (
+        np.std([a["final_score"] for a in top_10])
+        if len(top_10) >= 3 else 0.0
+    )
+
+    avg_sentiment = directional_avg
+
+
+    # -------------------------
+    # 6. Store history
+    # -------------------------
+    if past_avg_sentiments is None:
+        past_avg_sentiments = []
+    past_avg_sentiments.append(avg_sentiment)
+
+    return (
+    scored_articles,
+    volume_flag,
+    this_week,
+    avg_weekly,
+    volume_increase,
+    avg_sentiment,
+    sentiment_std,
+    past_avg_sentiments,
+    )
+
+
+def generate_sentiment(price_df, avg_sentiment, volume_flag, sentiment_std, past_sentiments=None):
+    """
+    Generates a signal using ranked news sentiment + technical context.
+    History adjusts confidence, not direction.
+    """
+    
+
+    # -------------------------------------------------
+    # 1. Historical normalization (soft, continuous)
+    # -------------------------------------------------
+    if past_sentiments and len(past_sentiments) >= 3:
+        hist_mean = np.mean(past_sentiments)
+        hist_std = np.std(past_sentiments) + 1e-6
+        z_score = (avg_sentiment - hist_mean) / hist_std
+
+        # Clamp extreme z-scores
+        z_score = np.clip(z_score, -2.5, 2.5)
+
+        # Normalize to [-1, 1]
+        sentiment_component = z_score / 2.5
+    else:
+        # No history → trust raw sentiment (but clamp)
+        sentiment_component = np.clip(avg_sentiment, -1, 1)
+        z_score = None
+
+    # -------------------------------------------------
+    # 2. Volume confirmation (boost, not filter)
+    # -------------------------------------------------
+    if volume_flag:
+        sentiment_component *= 1.15
+
+    # -------------------------------------------------
+    # 3. Technical trend
+    # -------------------------------------------------
+    ma20 = price_df["MA_20"].iloc[-1]
+    ma50 = price_df["MA_50"].iloc[-1]
+    trend_component = 1 if ma20 > ma50 else -1 if ma20 < ma50 else 0
+
+    # -------------------------------------------------
+    # 4. RSI context
+    # -------------------------------------------------
+    rsi = price_df["RSI"].iloc[-1]
+    if rsi < 30:
+        rsi_component = 1
+    elif rsi > 70:
+        rsi_component = -1
+    else:
+        rsi_component = 0
+
+    # -------------------------------------------------
+    # 5. Price location (range-aware)
+    # -------------------------------------------------
+    close = price_df["Close"].iloc[-1]
+    recent_min = price_df["Close"].rolling(30).min().iloc[-1]
+    recent_max = price_df["Close"].rolling(30).max().iloc[-1]
+
+    if close <= recent_min * 1.03:
+        price_component = 1
+    elif close >= recent_max * 0.97:
+        price_component = -1
+    else:
+        price_component = 0
+
+    # Dispersion penalty (uncertainty dampener)
+    if sentiment_std > 0.25:
+        sentiment_component *= 0.7
+    elif sentiment_std < 0.12:
+        sentiment_component *= 1.1
+
+    # -------------------------------------------------
+    # 6. Weighted fusion
+    # -------------------------------------------------
+    final_score = (
+    1.4 * sentiment_component +
+    1.0 * trend_component +
+    0.6 * rsi_component +
+    0.6 * price_component
+)
+
+    # Gold asymmetry: fear > optimism
+    if final_score < 0:
+        final_score *= 1.15
+    else:
+        final_score *= 0.95
+
+    # -------------------------------------------------
+    # 7. Decision bands
+    # -------------------------------------------------
+    if final_score >= 1.2:
+        signal = "BUY"
+    elif final_score <= -1.2:
+        signal = "SELL"
+    else:
+        signal = "HOLD"
+
+    print(
+        f"DEBUG | sentiment={avg_sentiment:.3f} "
+        f"| z={round(z_score,2) if z_score is not None else 'n/a'} "
+        f"| final={round(final_score,2)} "
+        f"| signal={signal}"
+    )
+
+    return signal, avg_sentiment
+
+tecnicals.py:
+import pandas as pd
+import numpy as np
+
+# -----------------------------
+# INDICATORS
+# -----------------------------
+def compute_technicals(df):
+    """
+    Compute key weekly technical indicators for gold:
+    - Moving Averages (short, medium, long)
+    - EMA short-term
+    - RSI (momentum)
+    - ATR / volatility
+    """
+    # Moving Averages
+    df['MA_10'] = df['Close'].rolling(window=10).mean()
+    df['MA_20'] = df['Close'].rolling(window=20).mean()
+    df['MA_50'] = df['Close'].rolling(window=50).mean()
+    df['MA_200'] = df['Close'].rolling(window=200).mean()
+    df['EMA_10'] = df['Close'].ewm(span=10, adjust=False).mean()
+
+    # RSI (momentum)
+    df['RSI'] = compute_rsi(df['Close'], 14)
+
+    # ATR-like volatility (rolling std)
+    df['ATR_14'] = df['Close'].rolling(14).std()
+
+    return df
+
+
+def compute_rsi(series, window=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window).mean()
+    rs = gain / (loss + 1e-6)
+    return 100 - (100 / (1 + rs))
+
+
+# -----------------------------
+# PRICE STRUCTURE FLAGS
+# -----------------------------
+def price_structure_flag(df, window):
+    """
+    Returns:
+    +1  → near support (buy zone)
+    -1  → near resistance (sell zone)
+     0  → neutral
+    """
+    close = df["Close"].iloc[-1]
+    low = df["Close"].rolling(window).min().iloc[-1]
+    high = df["Close"].rolling(window).max().iloc[-1]
+
+    if close <= low * 1.05:
+        return 1
+    elif close >= high * 0.97:
+        return -1
+    else:
+        return 0
+
+
+# -----------------------------
+# RSI MULTI-LEVEL SIGNAL
+# -----------------------------
+def rsi_signal(rsi):
+    if rsi < 30:
+        return 2
+    elif rsi < 40:
+        return 1
+    elif rsi > 70:
+        return -2
+    elif rsi > 60:
+        return -1
+    return 0
+
+
+# -----------------------------
+# TECHNICAL SIGNAL GENERATOR
+# -----------------------------
+def generate_technical(df, volume_flag=False):
+    """
+    Generate a weekly gold trade signal using:
+    - Multi-length trend (MA10/20/50/200)
+    - RSI (momentum)
+    - Price structure (multi-window support/resistance)
+    - Volatility dampening
+    - Optional volume confirmation
+    Returns a dict with signal, final score, confidence, and components.
+    """
+
+    latest = df.iloc[-1]
+
+    # -------- TREND COMPONENTS --------
+    trend_short = 1 if latest['MA_10'] > latest['MA_50'] else -1 if latest['MA_10'] < latest['MA_50'] else 0
+    trend_medium = 1 if latest['MA_20'] > latest['MA_50'] else -1 if latest['MA_20'] < latest['MA_50'] else 0
+    trend_long = 1 if latest['MA_50'] > latest['MA_200'] else -1 if latest['MA_50'] < latest['MA_200'] else 0
+    trend_score = trend_short * 0.4 + trend_medium * 0.35 + trend_long * 0.25
+
+    # -------- RSI COMPONENT --------
+    rsi_score = rsi_signal(latest['RSI'])
+
+    # -------- PRICE STRUCTURE --------
+    structure_windows = [15, 30, 45, 60, 90]
+    structure_weights = [0.1, 0.25, 0.3, 0.25, 0.1]
+    price_score = sum(price_structure_flag(df, w) * structure_weights[i] for i, w in enumerate(structure_windows))
+    structure_components = {f'price_structure_{w}': price_structure_flag(df, w) for w in structure_windows}
+
+    # -------- VOLUME / CONFIRMATION --------
+    volume_score = 1 if volume_flag else 0
+
+    # -------- VOLATILITY DAMPENING --------
+    atr = latest['ATR_14'] if not np.isnan(latest['ATR_14']) else 0
+    volatility_factor = 1.0
+    if atr > 0:
+        # high volatility reduces confidence
+        volatility_factor = max(0.5, min(1.0, 1.0 - (atr / latest['Close'])))
+
+    # -------- FINAL SCORE --------
+    final_score = (trend_score + rsi_score + price_score + volume_score) * volatility_factor
+
+    # Gold asymmetry: fear > optimism
+    if final_score < 0:
+        final_score *= 1.1
+    else:
+        final_score *= 0.95
+
+    # -------- DECISION --------
+    if final_score >= 2.0:
+        signal = "BUY"
+    elif final_score <= -2.0:
+        signal = "SELL"
+    else:
+        signal = "HOLD"
+
+    # -------- CONFIDENCE --------
+    # Weighted sum of absolute component contributions
+    weights = {"trend": 0.35, "rsi": 0.2, "price": 0.25, "volume": 0.1}
+    weighted_sum = (
+        abs(trend_score * weights["trend"]) +
+        abs(rsi_score * weights["rsi"]) +
+        abs(price_score * weights["price"]) +
+        abs(volume_score * weights["volume"])
+    )
+    max_weighted = sum(weights.values()) * max(1, abs(final_score))  # scale with final_score
+    technical_confidence = round(weighted_sum / max_weighted * 100 * volatility_factor, 1)
+
+    return {
+        "signal": signal,
+        "score": round(final_score, 2),
+        "confidence": technical_confidence,
+        "components": {
+            "trend_short": trend_short,
+            "trend_medium": trend_medium,
+            "trend_long": trend_long,
+            "rsi": rsi_score,
+            **structure_components,
+            "volume": volume_score,
+            "volatility_factor": round(volatility_factor, 3)
+        }
+    }
+
+
+app.py:
+from flask import Flask, jsonify
+from flask_cors import CORS
+from datetime import datetime, timedelta
+
+from fetchers.price_fetcher import fetch_gold_prices
+from fetchers.news_fetcher import fetch_gold_news_past_week
+
+from processors.technicals import compute_technicals, generate_technical
+from processors.sentiment import compute_sentiment, generate_sentiment
+from fusion.combined_signal import generate_combined_signal
+
+from database.db import (
+    init_db,
+    save_gold_price,
+    save_news,
+    save_news_volume,
+    load_past_volumes,
+    load_past_avg_sentiments,
+)
+
+app = Flask(__name__)
+CORS(app)
+init_db()
+
+
+@app.route("/analyze", methods=["GET"])
+def analyze():
+    # --------------------------
+    # 1. FETCH + PROCESS PRICES
+    # --------------------------
+    price_df = fetch_gold_prices(period="1y", interval="1d")
+    price_df = compute_technicals(price_df)
+
+    # Technical signal (weekly gold-focused)
+    technical = generate_technical(price_df)
+    print("this is the technical signal,", technical)
+    technical_signal = technical["signal"]
+    technical_confidence = technical["confidence"]
+
+    # --------------------------
+    # 2. NEWS + SENTIMENT
+    # --------------------------
+    articles = fetch_gold_news_past_week()
+    past_volumes = load_past_volumes()
+    past_avg_sentiments = load_past_avg_sentiments()
+
+    (
+        sentiment_list,
+        volume_flag,
+        this_week,
+        avg_weekly,
+        volume_increase,
+        avg_sentiment,
+        sentiment_std,
+        past_avg_sentiments,
+    ) = compute_sentiment(
+        articles,
+        past_volumes,
+        past_avg_sentiments
+    )
+
+    sentiment_signal, _ = generate_sentiment(
+        price_df,
+        avg_sentiment,
+        volume_flag,
+        sentiment_std,
+        past_avg_sentiments
+    )
+    sentiment_confidence = min(abs(avg_sentiment) * 100, 100)
+
+    # --------------------------
+    # 3. SAVE WEEKLY SENTIMENT
+    # --------------------------
+    week_start = (
+        datetime.utcnow() - timedelta(days=datetime.utcnow().weekday())
+    ).strftime("%Y-%m-%d")
+
+    save_news_volume(week_start, this_week, avg_sentiment)
+
+    # --------------------------
+    # 4. SAVE PRICE HISTORY
+    # --------------------------
+    for _, row in price_df.iterrows():
+        save_gold_price({
+            "date": row["Date"].strftime("%Y-%m-%d"),
+            "close": row["Close"],
+            "volume": row["Volume"],
+            "ma10": row.get("MA_10", None),
+            "ma20": row.get("MA_20", None),
+            "ma50": row.get("MA_50", None),
+            "ma200": row.get("MA_200", None),
+            "ema10": row.get("EMA_10", None),
+            "rsi": row.get("RSI", None),
+            "atr": row.get("ATR_14", None),
+        })
+
+    # --------------------------
+    # 5. SAVE NEWS
+    # --------------------------
+    for article in sentiment_list:
+        save_news(article)
+
+    # --------------------------
+    # 6. COMBINED SIGNAL
+    # --------------------------
+    combined_signal = generate_combined_signal(
+        technical,
+        sentiment_signal,
+        avg_sentiment
+    )
+
+    # --------------------------
+    # 7. COMBINED CONFIDENCE
+    # --------------------------
+    # Weighted sum: 70% technical, 30% sentiment
+    combined_confidence = round(
+        (technical_confidence * 0.7) + (sentiment_confidence * 0.3),
+        1
+    )
+
+    # --------------------------
+    # 8. API RESPONSE
+    # --------------------------
+    return jsonify({
+        "week_start": week_start,
+        "this_week_articles": int(this_week),
+        "average_weekly_articles": float(avg_weekly),
+        "volume_increase_percent": float(volume_increase),
+        "news_volume_spike": bool(volume_flag),
+
+        "technical": technical,
+        "technical_signal": technical_signal,
+        "technical_confidence": technical_confidence,
+
+        "sentiment_signal": sentiment_signal,
+        "sentiment_confidence": sentiment_confidence,
+
+        "combined_signal": combined_signal,
+        "combined_confidence": combined_confidence,
+
+        "sentiment_articles": sentiment_list
+    })
+
+
+if __name__ == "__main__":
+    print("🔥 Flask API running at http://127.0.0.1:5000")
+    app.run(debug=True)
+

@@ -6,8 +6,9 @@ def fetch_gold_prices(period="1y", interval="1d"):
     df = ticker.history(period=period, interval=interval)
 
     if df.empty:
-        raise Exception("Failed to fetch gold prices from Yahoo Finance.")
+        raise Exception("Failed to fetch gold prices.")
 
-    df = df[['Close', 'Volume']]
+    df = df[["Open", "High", "Low", "Close", "Volume"]]
     df.reset_index(inplace=True)
+
     return df

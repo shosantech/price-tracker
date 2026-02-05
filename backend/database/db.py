@@ -5,14 +5,24 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
-    c.execute("""CREATE TABLE IF NOT EXISTS gold_prices (
-        date TEXT PRIMARY KEY,
-        close REAL,
-        volume REAL,
-        ma20 REAL,
-        ma50 REAL,
-        rsi REAL
-    )""")
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS gold_prices (
+            date TEXT PRIMARY KEY,
+            open REAL,
+            high REAL,
+            low REAL,
+            close REAL,
+            volume REAL,
+            ma10 REAL,
+            ma20 REAL,
+            ma50 REAL,
+            ma200 REAL,
+            ema10 REAL,
+            rsi REAL,
+            atr REAL
+        )
+        """)
+
 
     c.execute("""CREATE TABLE IF NOT EXISTS news (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -23,12 +33,27 @@ def init_db():
     )""")
 
     c.execute("""
-CREATE TABLE IF NOT EXISTS news_volume (
-    week_start TEXT PRIMARY KEY,
-    total_articles INTEGER,
-    average_sentiment REAL
-)
-""")
+        CREATE TABLE IF NOT EXISTS news_volume (
+            week_start TEXT PRIMARY KEY,
+            total_articles INTEGER,
+            average_sentiment REAL
+        )
+        """)
+    
+    c.execute("""CREATE TABLE IF NOT EXISTS signal_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT,
+    price REAL,
+    technical_signal TEXT,
+    technical_confidence REAL,
+    sentiment_signal TEXT,
+    sentiment_confidence REAL,
+    combined_signal TEXT,
+    combined_confidence REAL,
+    regime TEXT,
+    explanation TEXT
+    );""")
+
 
     conn.commit()
     conn.close()
@@ -36,12 +61,32 @@ CREATE TABLE IF NOT EXISTS news_volume (
 def save_gold_price(data):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+
     c.execute("""
-        INSERT OR REPLACE INTO gold_prices (date, close, volume, ma20, ma50, rsi)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (data['date'], data['close'], data['volume'], data['ma20'], data['ma50'], data['rsi']))
+        INSERT OR REPLACE INTO gold_prices (
+            date, open, high, low, close, volume,
+            ma10, ma20, ma50, ma200, ema10, rsi, atr
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        data["date"],
+        data["open"],
+        data["high"],
+        data["low"],
+        data["close"],
+        data["volume"],
+        data.get("ma10"),
+        data.get("ma20"),
+        data.get("ma50"),
+        data.get("ma200"),
+        data.get("ema10"),
+        data.get("rsi"),
+        data.get("atr"),
+    ))
+
     conn.commit()
     conn.close()
+
 
 def save_news(data):
     conn = sqlite3.connect(DB_PATH)
@@ -89,4 +134,42 @@ def load_past_avg_sentiments():
 
     # Each row is a tuple (avg_sentiment,), so extract the float
     return [row[0] for row in rows]
+
+
+# In database/db.py
+
+def save_signal(data):
+    """
+    Save a combined signal entry into the signal_history table.
+    Expects a dict with keys:
+    - date, price, technical_signal, technical_confidence,
+      sentiment_signal, sentiment_confidence, combined_signal,
+      combined_confidence, regime, explanation
+    """
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    c.execute("""
+        INSERT INTO signal_history (
+            date, price,
+            technical_signal, technical_confidence,
+            sentiment_signal, sentiment_confidence,
+            combined_signal, combined_confidence,
+            regime, explanation
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        data.get("date"),
+        data.get("price"),
+        data.get("technical_signal"),
+        data.get("technical_confidence"),
+        data.get("sentiment_signal"),
+        data.get("sentiment_confidence"),
+        data.get("combined_signal"),
+        data.get("combined_confidence"),
+        data.get("regime"),
+        data.get("explanation")
+    ))
+
+    conn.commit()
+    conn.close()
 

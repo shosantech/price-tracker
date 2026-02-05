@@ -1,0 +1,104 @@
+Step 0: Price & News Collection
+--------------------------------
+Daily fetch:
+  - Gold prices (daily candles: open, high, low, close, volume)
+  - News articles (gold-related)
+Stored in DB:
+  - gold_prices table
+  - news table
+  - weekly news summary table
+
+|
+v
+
+Step 1: Technical & Sentiment Analysis
+--------------------------------------
+Technical indicators:
+  - Moving Averages (MA10, MA20, MA50, MA200)
+  - RSI
+  - ATR / volatility
+  - Price structure flags (support/resistance)
+
+Sentiment analysis:
+  - Score news articles (VADER + relevance + source credibility)
+  - Compute avg weekly sentiment
+  - Deduplicate & weight top articles
+
+|
+v
+
+Step 2: Generate Level 1 + Level 2 Signals
+------------------------------------------
+Level 1: basic signal fusion
+  - Combine technical + sentiment
+  - Apply confidence logic (alignment, HOLD reduces confidence)
+  - Determine regime (TRENDING vs RANGING)
+
+Level 2: enhanced
+  - Weighted signals based on past history
+  - Adjust thresholds based on volatility, dispersion, trends
+  - Gold asymmetry: fear > optimism
+
+|
+v
+
+Step 3: Signal Logging & History
+--------------------------------
+Log each signal to DB:
+  - Date, Price, Technical signal, Sentiment signal
+  - Combined signal, Confidence, Regime
+  - Future outcome (profit/loss after X days/weeks)
+Purpose:
+  - Track accuracy
+  - Generate performance metrics
+  - Basis for feedback loop
+
+|
+v
+
+Step 4: Alerts & Notifications
+-------------------------------
+Trigger alerts when:
+  - Price approaches critical levels (support/resistance)
+  - Strong signal confidence (BUY/SELL)
+  - High-impact news detected
+  - Patterns (e.g., pullbacks, breakouts) identified
+Methods:
+  - Email / Push / Discord / Webhook
+  - Optional: include chart snapshot from logged DB data
+
+|
+v
+
+Step 5: Charting & Visualization
+---------------------------------
+Generate charts from DB:
+  - Price candles + technical overlays (MA, RSI, ATR)
+  - Signal markers (BUY/SELL/HOLD)
+  - Patterns or regime highlights
+Frontend:
+  - Interactive chart
+  - Historical signal review
+  - Performance dashboard
+
+|
+v
+
+Step 6: Feedback Loop & Adaptive Improvement
+---------------------------------------------
+Use logged signals & outcomes to:
+  - Assess which indicators / weights are most predictive
+  - Adjust thresholds for confidence, signal fusion
+  - Identify systematic errors (false BUY/SELL)
+  - Suggest parameter improvements automatically (or semi-automated)
+
+|
+v
+
+Step 7: Profit Compounding Strategy
+-----------------------------------
+Once reliable:
+  - Track each trade (BUY → SELL → rebuy)
+  - Calculate realized profit in USD and gold ounces
+  - Adjust trade size for compounding
+  - Optimize over months/years for asset growth
